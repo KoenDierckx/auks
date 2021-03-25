@@ -80,6 +80,7 @@
 
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 
 #include <string.h>
 
@@ -125,12 +126,12 @@ _krb_is_local_tgt(krb5_principal princ, krb5_data *realm)
 }
 
 int
-auks_krb_cc_new_unique(char ** fullname_out)
+auks_krb_cc_new_unique(char ** fullname_out, uint32_t jobid, uid_t uid)
 {
 	int fstatus;
 
 	krb5_context context;
-	krb5_ccache ccache;
+	krb5_ccache ccache = NULL, defccache = NULL;
 
 	char *ccache_type = NULL, *ccache_name = NULL;
 
@@ -143,7 +144,7 @@ auks_krb_cc_new_unique(char ** fullname_out)
 	}
 
 	/* Get the default ccache */
-	fstatus = krb5_cc_default(context, &ccache);
+	fstatus = krb5_cc_default(context, &defccache);
 	if (fstatus) {
 	        auks_error("Error while getting default ccache");
 		fstatus = AUKS_ERROR_KRB5_CRED_OPEN_CC ;
@@ -151,43 +152,77 @@ auks_krb_cc_new_unique(char ** fullname_out)
 	}
 
 	/* Get the default ccache type */
-	ccache_type = krb5_cc_get_type(context, ccache);
+    ccache_type = krb5_cc_get_type(context, defccache);
+    if (strcmp (ccache_type,"FILE") == 0) {
+        char auks_credcache[PATH_MAX];
+        auks_credcache[0]='\0';
+        fstatus = snprintf(auks_credcache,PATH_MAX, "/tmp/krb5cc_%u_%u_XXXXXX", uid,jobid);
+        if ( fstatus >= PATH_MAX || fstatus < 0 ) {
+            xerror("unable to build auks credcache name");
+            goto out_cc;
+        }
+        mode_t omask = umask(S_IRUSR | S_IWUSR);
+        fstatus = mkstemp(auks_credcache);
+        umask(omask);
 
-	/* Generate a new unique ccache */
-	fstatus = krb5_cc_new_unique(context, ccache_type, NULL, &ccache);
-	if (fstatus) {
-		auks_error("Error while generating new unique ccache of type %s", ccache_type);
-		fstatus = AUKS_ERROR_KRB5_CRED_OPEN_CC ;
-		goto out;
-	}
+        if ( fstatus == -1 ) {
+            xerror("unable to create a unique auks credcache");
+            goto out_cc;
+        }
 
+        close (fstatus);
+        fstatus = unlink (auks_credcache);
+        if ( fstatus == -1 ) {
+            xerror("unable to unlink  auks credcache");
+            goto out_cc;
+        }
+        /* XXX: maybe use strdup? */
+        size_t l = strlen(auks_credcache) + 1;
+        *fullname_out = (char *) malloc(l * sizeof(char *));
+        if (fullname_out == NULL) {
+            xerror("unable to allocate memeory for credcache file name");
+            goto out_cc;
+        }
+        strncpy(*fullname_out, auks_credcache,l);
+    } else {
+        /* Generate a new unique ccache */
+        fstatus = krb5_cc_new_unique(context, ccache_type, NULL, &ccache);
+        if (fstatus) {
+            auks_error("Error while generating new unique ccache of type %s", ccache_type);
+            fstatus = AUKS_ERROR_KRB5_CRED_OPEN_CC ;
+            goto out;
+        }
 
-	/* Get ccache full name */
-	fstatus = krb5_cc_get_full_name(context, ccache, &ccache_name);
-	if (fstatus) {
-		auks_error("Error while geting ccache full name");
-		fstatus = AUKS_ERROR_KRB5_CRED_OPEN_CC ;
-		goto out_cc;
-	}
+        /* Get ccache full name */
+        fstatus = krb5_cc_get_full_name(context, ccache, &ccache_name);
 
-	/* Set output var */
-	size_t l = strlen(ccache_name) + 1;
-	*fullname_out = (char *) malloc(l * sizeof(char *));
-	strcpy(*fullname_out, ccache_name);
-
-	/* Call krb5_cc_switch for ccache that supports it */
-	if (krb5_cc_support_switch(context, ccache_type)) {
-		fstatus = krb5_cc_switch(context, ccache);
 		if (fstatus) {
-			auks_error("Error while calling krb5_cc_switch");
+			auks_error("Error while geting ccache full name");
 			fstatus = AUKS_ERROR_KRB5_CRED_OPEN_CC ;
 			goto out_cc;
 		}
+        /* Set output var */
+        size_t l = strlen(ccache_name) + 1;
+        *fullname_out = (char *) malloc(l * sizeof(char *));
+        strcpy(*fullname_out, ccache_name);
+
+        /* Call krb5_cc_switch for ccache that supports it */
+        if (krb5_cc_support_switch(context, ccache_type)) {
+            fstatus = krb5_cc_switch(context, ccache);
+            if (fstatus) {
+                auks_error("Error while calling krb5_cc_switch");
+                fstatus = AUKS_ERROR_KRB5_CRED_OPEN_CC ;
+                goto out_cc;
+            }
+        }
 	}
 
  out_cc:
 	/* Close ccache handles */
-	krb5_cc_close(context, ccache);
+    if (ccache != NULL)
+           krb5_cc_close(context, ccache);
+    if (defccache != NULL)
+           krb5_cc_close(context, defccache);
 
  out:
 	krb5_free_string(context, ccache_name);

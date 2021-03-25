@@ -507,7 +507,7 @@ spank_auks_remote_init (spank_t sp, int ac, char *av[])
 		goto out_cred;
 	}
 
-	fstatus = auks_krb_cc_new_unique(&auks_credcache);
+	fstatus = auks_krb_cc_new_unique(&auks_credcache,jobid,uid);
 	if (fstatus) {
 	        xerror("Error while initializing a new unique");
 		goto out_err;
